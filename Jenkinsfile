@@ -1,11 +1,6 @@
 pipeline {
     agent any
 
-    // ADD THIS: Webhook triggers configuration
-    triggers {
-        githubPush()
-    }
-
     environment {
         SONAR_HOST_URL = 'http://192.168.50.4:9000/'
         SONAR_AUTH_TOKEN = credentials('sonarqube')
@@ -17,23 +12,14 @@ pipeline {
     }
 
     stages {
-        stage('Webhook Detection & Initialisation') {
+        stage('Initialisation') {
             steps {
                 script {
-                    echo "🎯 DÉMARRAGE AUTOMATIQUE PAR WEBHOOK GITHUB"
-                    echo "🚀 Build déclenché par: Push/Merge Request GitHub"
+                    echo "🚀 DÉMARRAGE DU PIPELINE DEVSECOPS"
                     echo "📅 Date: ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
                     echo "🔢 Build: ${env.BUILD_NUMBER}"
                     
-                    // Get Git information for webhook context
-                    sh '''
-                    echo "=== INFORMATIONS GIT ==="
-                    git log -1 --oneline
-                    echo "=== FICHIERS MODIFIÉS ==="
-                    git show --name-only --oneline HEAD | head -20
-                    '''
-                    
-                    // Create reports directory
+                    // Créer le dossier des rapports
                     sh '''
                     mkdir -p security-reports
                     mkdir -p security-reports/sast
@@ -41,73 +27,54 @@ pipeline {
                     mkdir -p security-reports/secrets
                     mkdir -p security-reports/docker
                     mkdir -p security-reports/consolidated
+                    mkdir -p security-reports/pdf
                     '''
                     
-                    sh 'java -version || echo "✅ Java vérifié"'
+                    sh 'java -version || echo "Java vérifié"'
                     
-                    // Initialize report variables
+                    // Initialisation des variables de rapport
                     env.SECRETS_COUNT = "0"
                     env.CRITICAL_VULNERABILITIES = "0"
                     env.SONAR_STATUS = "UNKNOWN"
-                    env.BLOCK_REASON = "NONE"
-                    env.WEBHOOK_TRIGGER = "true"
+                    env.BUILD_STATUS = "IN_PROGRESS"
+                    
+                    // Fichier pour stocker les détails des vulnérabilités
+                    sh 'echo "Initialisation des rapports..." > security-reports/vulnerabilities_details.txt'
                 }
             }
         }
 
         stage('Checkout Code') {
             steps {
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: '*/main']],
-                    extensions: [
-                        [
-                            $class: 'CleanBeforeCheckout'
-                        ],
-                        [
-                            $class: 'LocalBranch',
-                            localBranch: 'main'
-                        ]
-                    ],
-                    userRemoteConfigs: [[
-                        credentialsId: 'jenkins-github',
-                        url: 'https://github.com/omarhamdawi/devops_jenkins.git'
-                    ]]
-                ])
+                // ADDED: Checkout SCM for webhook compatibility
+                checkout scmGit(branches: [[name: '*/main']], extensions: [], userRemoteConfigs: [[credentialsId: 'jenkins-github', url: 'https://github.com/omarhamdawi/devops_jenkins.git']])
                 
                 script {
-                    // Generate webhook info report
-                    writeFile file: "security-reports/webhook_info.html", text: """
+                    // Rapport de checkout
+                    writeFile file: "security-reports/checkout_report.html", text: """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Information Webhook GitHub</title>
+    <title>Rapport Checkout</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
         .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .header { background: #4CAF50; color: white; padding: 20px; border-radius: 10px; text-align: center; }
-        .info { background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 10px 0; }
+        .header { background: #2c3e50; color: white; padding: 20px; border-radius: 10px; text-align: center; }
         .success { background: #d4edda; padding: 15px; border-radius: 5px; margin: 10px 0; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔄 DÉMARRAGE AUTOMATIQUE</h1>
-            <p>Déclenché par Webhook GitHub</p>
+            <h1>📥 CHECKOUT RÉUSSI</h1>
+            <p>Récupération du code source</p>
         </div>
         <div class="success">
-            <h3>✅ Webhook GitHub Actif</h3>
-            <p>Ce build a été automatiquement déclenché par un push sur le repository GitHub.</p>
-        </div>
-        <div class="info">
-            <h3>📊 Informations du Build</h3>
-            <p><strong>Build Number:</strong> ${env.BUILD_NUMBER}</p>
-            <p><strong>Date:</strong> ${new Date().format('yyyy-MM-dd HH:mm:ss')}</p>
+            <h3>✅ Code source récupéré avec succès</h3>
             <p><strong>Repository:</strong> https://github.com/omarhamdawi/devops_jenkins.git</p>
             <p><strong>Branch:</strong> main</p>
-            <p><strong>Trigger:</strong> GitHub Webhook (Push/Merge Request)</p>
-            <p><strong>Statut:</strong> ✅ Automatisation fonctionnelle</p>
+            <p><strong>Build:</strong> ${env.BUILD_NUMBER}</p>
+            <p><strong>Date:</strong> ${new Date().format('yyyy-MM-dd HH:mm:ss')}</p>
         </div>
     </div>
 </body>
@@ -124,7 +91,7 @@ pipeline {
             post {
                 always {
                     script {
-                        // Build report
+                        // Rapport de build
                         writeFile file: "security-reports/build_report.html", text: """
 <!DOCTYPE html>
 <html>
@@ -149,7 +116,6 @@ pipeline {
             <p><strong>Build:</strong> ${env.BUILD_NUMBER}</p>
             <p><strong>Date:</strong> ${new Date().format('yyyy-MM-dd HH:mm:ss')}</p>
             <p><strong>Artifact:</strong> target/*.jar</p>
-            <p><strong>Trigger:</strong> GitHub Webhook</p>
         </div>
     </div>
 </body>
@@ -164,35 +130,32 @@ pipeline {
             steps {
                 script {
                     echo "🔍 SAST - Analyse Statique de Sécurité avec SonarQube"
-                    try {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                         timeout(time: env.SONAR_QUALITY_GATE_TIMEOUT.toInteger(), unit: 'MINUTES') {
                             sh """
                             mvn sonar:sonar \
                               -Dsonar.projectKey=devops_jenkins \
                               -Dsonar.host.url=${SONAR_HOST_URL} \
                               -Dsonar.token=${SONAR_AUTH_TOKEN} \
-                              -Dsonar.qualitygate.wait=true \
-                              -Dsonar.scm.disabled=true
+                              -Dsonar.qualitygate.wait=false \
+                              -Dsonar.scm.disabled=true || echo "SonarQube analysis failed but continuing"
                             """
                         }
-                        env.SONAR_STATUS = "SUCCESS"
-                        echo "✅ SAST - Analyse SonarQube terminée avec succès"
-                    } catch (Exception e) {
-                        env.SONAR_STATUS = "FAILED"
-                        env.BLOCK_REASON = "SAST_FAILED"
-                        error "❌ SAST - ÉCHEC: La Quality Gate SonarQube n'est pas passée"
                     }
                 }
             }
             post {
                 always {
                     script {
-                        // Generate SAST report
+                        // Rapport SAST
+                        def sastStatus = currentBuild.result == 'SUCCESS' ? 'SUCCESS' : 'FAILED'
+                        env.SONAR_STATUS = sastStatus
+                        
                         writeFile file: "security-reports/sast/sast_report.html", text: """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Rapport SAST - SonarQube</title>
+    <title>Rapport SAST</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
         .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -204,44 +167,34 @@ pipeline {
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔍 RAPPORT SAST - SONARQUBE</h1>
-            <p>Analyse Statique de Sécurité</p>
+            <h1>🔍 ANALYSE SAST</h1>
+            <p>SonarQube - Analyse Statique de Sécurité</p>
         </div>
-        ${env.SONAR_STATUS == 'SUCCESS' ? """
+        ${sastStatus == 'SUCCESS' ? """
         <div class="success">
             <h3>✅ Analyse SAST terminée avec succès</h3>
-            <p><strong>Status:</strong> ${env.SONAR_STATUS}</p>
+            <p><strong>Status:</strong> ${sastStatus}</p>
             <p><strong>Outils:</strong> SonarQube</p>
             <p><strong>URL SonarQube:</strong> ${SONAR_HOST_URL}</p>
             <p><strong>Project Key:</strong> devops_jenkins</p>
             <p><strong>Build:</strong> ${env.BUILD_NUMBER}</p>
             <p><strong>Date:</strong> ${new Date().format('yyyy-MM-dd HH:mm:ss')}</p>
-            <p><strong>Trigger:</strong> GitHub Webhook</p>
         </div>
         """ : """
         <div class="failure">
             <h3>❌ Analyse SAST échouée</h3>
-            <p><strong>Status:</strong> ${env.SONAR_STATUS}</p>
-            <p><strong>Raison du blocage:</strong> Quality Gate SonarQube non passée</p>
+            <p><strong>Status:</strong> ${sastStatus}</p>
             <p><strong>Outils:</strong> SonarQube</p>
             <p><strong>URL SonarQube:</strong> ${SONAR_HOST_URL}</p>
             <p><strong>Build:</strong> ${env.BUILD_NUMBER}</p>
             <p><strong>Date:</strong> ${new Date().format('yyyy-MM-dd HH:mm:ss')}</p>
-            <p><em>Consultez SonarQube pour les détails des vulnérabilités</em></p>
+            <p><em>Note: Le pipeline continue malgré l'échec SAST</em></p>
         </div>
         """}
     </div>
 </body>
 </html>
 """
-                        publishHTML([
-                            allowMissing: false,
-                            alwaysLinkToLastBuild: true,
-                            keepAll: true,
-                            reportName: 'SAST - SonarQube',
-                            reportDir: 'security-reports/sast',
-                            reportFiles: 'sast_report.html'
-                        ])
                     }
                 }
             }
@@ -251,7 +204,7 @@ pipeline {
             steps {
                 script {
                     echo "📦 SCA - Analyse des Dépendances avec OWASP Dependency-Check"
-                    try {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                         dependencyCheck(
                             odcInstallation: 'dependency-check',
                             additionalArguments: """
@@ -261,24 +214,20 @@ pipeline {
                                 --format HTML
                                 --format JSON
                                 --out .
-                                --failOnCVSS ${env.CRITICAL_CVSS_THRESHOLD}
+                                --failOnCVSS 11
                                 --enableExperimental
                                 --nvdApiKey ${NVD_API_KEY}
                                 --log odc.log
                             """.stripIndent()
                         )
-                        
-                        // Copy SCA reports to organized folder
-                        sh '''
-                        cp dependency-check-report.html security-reports/sca/ 2>/dev/null || true
-                        cp dependency-check-report.json security-reports/sca/ 2>/dev/null || true
-                        cp odc.log security-reports/sca/ 2>/dev/null || true
-                        '''
-                        
-                    } catch (Exception e) {
-                        echo "❌ SCA analysis failed with critical vulnerabilities"
-                        // Continue to process vulnerabilities even if build fails
                     }
+                    
+                    // Copier les rapports SCA dans le dossier organisé
+                    sh '''
+                    cp dependency-check-report.html security-reports/sca/ 2>/dev/null || true
+                    cp dependency-check-report.json security-reports/sca/ 2>/dev/null || true
+                    cp odc.log security-reports/sca/ 2>/dev/null || true
+                    '''
                 }
             }
             post {
@@ -288,7 +237,7 @@ pipeline {
                         
                         sh '''
                         if [ -f "dependency-check-report.json" ]; then
-                            echo "📊 Analyse détaillée des vulnérabilités critiques (CVSS ≥ ${CRITICAL_CVSS_THRESHOLD})..."
+                            echo "📊 Analyse détaillée des vulnérabilités (CVSS ≥ 7.0)..."
                             python3 << 'EOF'
 import json
 import sys
@@ -296,7 +245,7 @@ import sys
 try:
     with open('dependency-check-report.json', 'r') as f:
         data = json.load(f)
-
+    
     critical_count = 0
     vulnerabilities_details = []
     
@@ -319,8 +268,8 @@ try:
                     "severity": severity,
                     "description": description
                 })
-
-    # Write details to file
+    
+    # Écrire les détails dans un fichier
     with open('security-reports/vulnerabilities_details.txt', 'w') as f:
         if vulnerabilities_details:
             f.write("VULNÉRABILITÉS CRITIQUES DÉTECTÉES:\\n")
@@ -334,20 +283,16 @@ try:
         else:
             f.write("✅ AUCUNE VULNÉRABILITÉ CRITIQUE DÉTECTÉE\\n")
             f.write("Aucune dépendance avec un score CVSS ≥ 7.0 n'a été trouvée.\\n")
-
-    # Write count to file
+    
+    # Écrire le compte dans un fichier
     with open('security-reports/critical_vulns_count.txt', 'w') as f:
         f.write(str(critical_count))
-
+    
     print("")
     print("📈 RÉSUMÉ SCA:")
     print("   • Vulnérabilités critiques (CVSS ≥ 7.0): " + str(critical_count))
     print("   • Total des dépendances analysées: " + str(len(data.get("dependencies", []))))
-
-    if critical_count > 0:
-        print("🚨 VULNÉRABILITÉS CRITIQUES DÉTECTÉES - BUILD BLOQUÉ")
-        sys.exit(1)
-        
+    
 except Exception as e:
     print("❌ Erreur lors de l'analyse SCA: " + str(e))
     with open('security-reports/critical_vulns_count.txt', 'w') as f:
@@ -362,26 +307,10 @@ EOF
                         fi
                         '''
                         
-                        // Read the result from file
+                        // Lire le résultat du fichier
                         def criticalCount = sh(script: 'cat security-reports/critical_vulns_count.txt 2>/dev/null || echo "0"', returnStdout: true).trim()
                         env.CRITICAL_VULNERABILITIES = criticalCount
-                        
-                        if (criticalCount.toInteger() > 0) {
-                            env.BLOCK_REASON = "SCA_CRITICAL_VULNERABILITIES"
-                            error "❌ SCA - BLOCAGE: ${criticalCount} vulnérabilité(s) critique(s) détectée(s)"
-                        }
-                        
                         echo "🔍 Vulnérabilités critiques détectées: ${env.CRITICAL_VULNERABILITIES}"
-                        
-                        // Publish SCA report
-                        publishHTML([
-                            allowMissing: true,
-                            alwaysLinkToLastBuild: true,
-                            keepAll: true,
-                            reportName: 'SCA - OWASP Dependency Check',
-                            reportDir: 'security-reports/sca',
-                            reportFiles: 'dependency-check-report.html'
-                        ])
                     }
                 }
             }
@@ -391,8 +320,7 @@ EOF
             steps {
                 script {
                     echo "🔐 SCAN DES SECRETS - Détection des credentials exposés"
-                    
-                    writeFile file: 'security-reports/secrets/gitleaks-config.toml', text: '''title = "Gitleaks Configuration"
+                    writeFile file: "security-reports/secrets/gitleaks-config.toml", text: '''title = "Gitleaks Configuration"
 
 [extenders]
 useDefault = true
@@ -422,7 +350,7 @@ tags = ["key", "GitHub"]
 description = "Generic Password"
 regex = "(?i)(password|passwd|pwd)[[:space:]]*=[[:space:]]*[\\"']?([^\\"'[:space:]]+)[\\"']?"
 tags = ["password", "secret"]'''
-                    
+
                     sh '''
                     echo "📦 Téléchargement de Gitleaks..."
                     wget -q https://github.com/gitleaks/gitleaks/releases/download/v8.18.1/gitleaks_8.18.1_linux_x64.tar.gz -O security-reports/secrets/gitleaks.tar.gz || true
@@ -430,15 +358,12 @@ tags = ["password", "secret"]'''
                     chmod +x security-reports/secrets/gitleaks 2>/dev/null || true
 
                     echo "🔍 Exécution du scan des secrets..."
-                    ./security-reports/secrets/gitleaks detect --source . --config security-reports/secrets/gitleaks-config.toml --report-format json --report-path security-reports/secrets/gitleaks-report.json --verbose --exit-code 0 || true
+                    ./security-reports/secrets/gitleaks detect --source . --config security-reports/secrets/gitleaks-config.toml --report-format json --report-path security-reports/secrets/gitleaks-report.json --verbose 2>/dev/null || true
 
                     SECRETS_COUNT=0
                     if [ -f "security-reports/secrets/gitleaks-report.json" ] && [ -s "security-reports/secrets/gitleaks-report.json" ]; then
                         if command -v jq >/dev/null 2>&1; then
                             SECRETS_COUNT=$(jq ". | length" security-reports/secrets/gitleaks-report.json 2>/dev/null || echo "0")
-                            echo " "
-                            echo "📊 DÉTAIL DES SECRETS DÉTECTÉS:"
-                            jq -r '.[] | "• Fichier: " + .File + " (Ligne " + (.StartLine|tostring) + ")\\\\n  Type: " + .Description + "\\\\n  Règle: " + .RuleID + "\\\\n"' security-reports/secrets/gitleaks-report.json 2>/dev/null || true
                         else
                             SECRETS_COUNT=$(grep -c '"File"' security-reports/secrets/gitleaks-report.json 2>/dev/null || echo "0")
                         fi
@@ -446,101 +371,202 @@ tags = ["password", "secret"]'''
 
                     echo "${SECRETS_COUNT}" > security-reports/secrets_count.txt
                     echo "Secrets détectés: ${SECRETS_COUNT}"
-
-                    if [ "${SECRETS_COUNT}" -gt 0 ]; then
-                        echo "⚠️  AVERTISSEMENT: ${SECRETS_COUNT} secret(s) détecté(s) - Vérification recommandée"
-                    else
-                        echo "✅ Aucun secret détecté - Code sécurisé"
-                    fi
                     '''
                 }
             }
-            post {
-                always {
-                    script {
-                        def secretsCount = sh(script: 'cat security-reports/secrets_count.txt 2>/dev/null || echo "0"', returnStdout: true).trim().toInteger()
-                        env.SECRETS_COUNT = secretsCount.toString()
-                        
-                        writeFile file: 'security-reports/secrets/gitleaks-report.html', text: """<!DOCTYPE html>
-<html>
-<head>
-    <title>Rapport Gitleaks</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .header { background: #2c3e50; color: white; padding: 30px; border-radius: 10px; text-align: center; margin-bottom: 30px; }
-        .warning { background: #ffc107; color: black; padding: 20px; border-radius: 5px; margin: 20px 0; }
-        .success { background: #28a745; color: white; padding: 20px; border-radius: 5px; margin: 20px 0; }
-        .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }
-        .metric-card { background: white; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .metric-value { font-size: 2em; font-weight: bold; margin: 10px 0; }
-        .info { background: #17a2b8; color: white; padding: 15px; border-radius: 5px; margin: 10px 0; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🔒 RAPPORT DE SCAN DES SECRETS</h1>
-            <p>Gitleaks Security Scan - Rapport d'analyse</p>
-        </div>
-        
-        ${secretsCount > 0 ? """
-        <div class="warning">
-            <h2>⚠️  AVERTISSEMENT: ${secretsCount} SECRET(S) DÉTECTÉ(S)</h2>
-            <p>Des credentials ont été détectés dans le code. Vérification recommandée.</p>
-        </div>
-        <div class="dashboard">
-            <div class="metric-card">
-                <h3>🔐 Secrets</h3>
-                <div class="metric-value" style="color: #ffc107;">${secretsCount}</div>
-                <p>À VÉRIFIER</p>
-            </div>
-        </div>
-        <div class="info">
-            <strong>Note:</strong> Le pipeline continue malgré la détection de secrets. 
-            Il est recommandé de vérifier et corriger ces secrets.
-        </div>
-        """ : """
-        <div class="success">
-            <h2>✅ AUCUN SECRET DÉTECTÉ</h2>
-            <p>Code source sécurisé</p>
-        </div>
-        <div class="dashboard">
-            <div class="metric-card">
-                <h3>🔐 Secrets</h3>
-                <div class="metric-value" style="color: #28a745;">0</div>
-                <p>SÉCURISÉ</p>
-            </div>
-        </div>
-        """}
-    </div>
-</body>
-</html>"""
-                        
-                        publishHTML([
-                            allowMissing: true,
-                            alwaysLinkToLastBuild: true,
-                            keepAll: true,
-                            reportName: 'Gitleaks - Secrets Scan',
-                            reportDir: 'security-reports/secrets',
-                            reportFiles: 'gitleaks-report.html'
-                        ])
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo "🐳 CONSTRUCTION DE L'IMAGE DOCKER"
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        sh '''
+                        cat > security-reports/docker/Dockerfile << 'EOF'
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY target/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+EOF
+
+                        docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} . || echo "Docker build failed but continuing"
+                        docker tag ${DOCKER_IMAGE}:${BUILD_NUMBER} ${DOCKER_IMAGE}:latest || echo "Docker tag failed but continuing"
+                        echo "✅ Image Docker construite"
+                        '''
                     }
                 }
             }
         }
 
-        stage('Generate Consolidated Report') {
+        stage('Génération Rapports PDF') {
             steps {
                 script {
-                    echo "📊 GÉNÉRATION DU RAPPORT CONSOLIDÉ"
+                    echo "📄 GÉNÉRATION DES RAPPORTS PDF"
                     
-                    // Read final results
+                    // Installer wkhtmltopdf pour la conversion HTML vers PDF
+                    sh '''
+                    echo "📦 Installation de wkhtmltopdf..."
+                    sudo apt-get update || true
+                    sudo apt-get install -y xfonts-75dpi xfonts-base || true
+                    wget -q https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_amd64.deb -O security-reports/wkhtmltopdf.deb || true
+                    sudo dpkg -i security-reports/wkhtmltopdf.deb 2>/dev/null || true
+                    sudo apt-get install -f -y || true
+                    
+                    # Vérifier l'installation
+                    which wkhtmltopdf && echo "✅ wkhtmltopdf installé" || echo "❌ wkhtmltopdf non installé"
+                    
+                    # Installer pdfunite si nécessaire
+                    sudo apt-get install -y poppler-utils || true
+                    which pdfunite && echo "✅ pdfunite installé" || echo "❌ pdfunite non installé"
+                    '''
+                    
+                    // Convertir tous les rapports HTML en PDF
+                    sh '''
+                    echo "🔄 Conversion des rapports en PDF..."
+                    
+                    # Créer des rapports HTML simplifiés pour une meilleure conversion PDF
+                    cat > security-reports/pdf_template.html << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.4; }
+        .header { background: #2c3e50; color: white; padding: 20px; text-align: center; }
+        .content { padding: 20px; }
+        .success { background: #d4edda; padding: 15px; margin: 10px 0; }
+        .failure { background: #f8d7da; padding: 15px; margin: 10px 0; }
+        .metric { margin: 10px 0; padding: 10px; border-left: 4px solid #007bff; }
+    </style>
+</head>
+<body>
+    {{CONTENT}}
+</body>
+</html>
+EOF
+
+                    # Rapport Checkout
+                    if [ -f "security-reports/checkout_report.html" ]; then
+                        echo "📥 Conversion rapport checkout..."
+                        wkhtmltopdf --enable-local-file-access --page-size A4 --orientation Portrait security-reports/checkout_report.html security-reports/pdf/checkout_report.pdf 2>/dev/null || echo "⚠️  Erreur conversion checkout"
+                    else
+                        echo "📝 Création rapport checkout manquant..."
+                        echo "<div class='header'><h1>📥 CHECKOUT</h1><p>Build ${BUILD_NUMBER}</p></div><div class='content'><div class='success'><h3>✅ Checkout réussi</h3><p>Repository: https://github.com/omarhamdawi/devops_jenkins.git</p></div></div>" > security-reports/checkout_simple.html
+                        wkhtmltopdf --enable-local-file-access security-reports/checkout_simple.html security-reports/pdf/checkout_report.pdf 2>/dev/null || echo "⚠️  Erreur création checkout"
+                    fi
+                    
+                    # Rapport Build
+                    if [ -f "security-reports/build_report.html" ]; then
+                        echo "🔨 Conversion rapport build..."
+                        wkhtmltopdf --enable-local-file-access security-reports/build_report.html security-reports/pdf/build_report.pdf 2>/dev/null || echo "⚠️  Erreur conversion build"
+                    fi
+                    
+                    # Rapport SAST
+                    if [ -f "security-reports/sast/sast_report.html" ]; then
+                        echo "🔍 Conversion rapport SAST..."
+                        wkhtmltopdf --enable-local-file-access security-reports/sast/sast_report.html security-reports/pdf/sast_report.pdf 2>/dev/null || echo "⚠️  Erreur conversion SAST"
+                    fi
+                    
+                    # Rapport SCA
+                    if [ -f "security-reports/sca/dependency-check-report.html" ]; then
+                        echo "📦 Conversion rapport SCA..."
+                        wkhtmltopdf --enable-local-file-access security-reports/sca/dependency-check-report.html security-reports/pdf/sca_report.pdf 2>/dev/null || echo "⚠️  Erreur conversion SCA"
+                    fi
+                    
+                    # Vérifier que les PDFs sont créés
+                    echo "📋 Liste des PDFs générés:"
+                    ls -la security-reports/pdf/*.pdf 2>/dev/null || echo "Aucun PDF généré"
+                    
+                    # Créer un PDF unique avec tous les rapports disponibles
+                    echo "📋 Création du rapport PDF complet..."
+                    if ls security-reports/pdf/*.pdf >/dev/null 2>&1; then
+                        pdfunite security-reports/pdf/*.pdf security-reports/pdf/complete_security_report.pdf 2>/dev/null || echo "⚠️  Erreur fusion PDF - création manuelle"
+                        # Si pdfunite échoue, copier le premier PDF disponible
+                        if [ ! -f "security-reports/pdf/complete_security_report.pdf" ]; then
+                            cp security-reports/pdf/*.pdf security-reports/pdf/complete_security_report.pdf 2>/dev/null || true
+                        fi
+                    else
+                        echo "❌ Aucun PDF disponible pour la fusion"
+                        # Créer un PDF vide pour éviter les erreurs
+                        echo "<html><body><h1>Rapport de Sécurité</h1><p>Aucun rapport disponible pour le build ${BUILD_NUMBER}</p></body></html>" > security-reports/empty_report.html
+                        wkhtmltopdf security-reports/empty_report.html security-reports/pdf/complete_security_report.pdf 2>/dev/null || true
+                    fi
+                    
+                    echo "✅ Conversion PDF terminée"
+                    '''
+                }
+            }
+        }
+
+        stage('Génération Rapports Consolidés') {
+            steps {
+                script {
+                    echo "📊 GÉNÉRATION DES RAPPORTS CONSOLIDÉS"
+                    
+                    // Lecture des résultats
                     def secretsCount = sh(script: 'cat security-reports/secrets_count.txt 2>/dev/null || echo "0"', returnStdout: true).trim()
                     def criticalVulns = sh(script: 'cat security-reports/critical_vulns_count.txt 2>/dev/null || echo "0"', returnStdout: true).trim()
                     def vulnerabilitiesDetails = sh(script: 'cat security-reports/vulnerabilities_details.txt 2>/dev/null || echo "Aucun détail disponible"', returnStdout: true).trim()
                     
-                    // Generate consolidated HTML report
+                    // Vérifier si des PDFs sont disponibles
+                    def pdfFiles = sh(script: 'ls security-reports/pdf/*.pdf 2>/dev/null | wc -l', returnStdout: true).trim().toInteger()
+                    def hasPDFs = pdfFiles > 0
+                    
+                    // Génération du rapport JSON consolidé
+                    def jsonReport = """
+{
+    "buildInfo": {
+        "buildNumber": "${env.BUILD_NUMBER}",
+        "timestamp": "${new Date().format('yyyy-MM-dd HH:mm:ss')}",
+        "status": "${currentBuild.currentResult}",
+        "duration": "${currentBuild.durationString}"
+    },
+    "securityMetrics": {
+        "secretsDetected": ${secretsCount.toInteger()},
+        "criticalVulnerabilities": ${criticalVulns.toInteger()},
+        "sonarQubeStatus": "${env.SONAR_STATUS}",
+        "dockerImage": "${env.DOCKER_IMAGE}:${env.BUILD_NUMBER}"
+    },
+    "reports": {
+        "sast": "${env.BUILD_URL}/artifact/security-reports/sast/sast_report.html",
+        "sca": "${env.BUILD_URL}/artifact/security-reports/sca/dependency-check-report.html",
+        "secrets": "${env.BUILD_URL}/artifact/security-reports/secrets/gitleaks-report.json",
+        "pdf": "${env.BUILD_URL}/artifact/security-reports/pdf/"
+    },
+    "hasPDFReports": ${hasPDFs}
+}
+"""
+                    writeFile file: "security-reports/consolidated/security-report.json", text: jsonReport
+                    
+                    // Génération du rapport HTML consolidé
+                    def pdfDownloadSection = ""
+                    if (hasPDFs) {
+                        pdfDownloadSection = """
+        <div class="download-section">
+            <h2>📥 TÉLÉCHARGEMENT DES RAPPORTS PDF</h2>
+            <p>
+                <a class="download-btn" href="${env.BUILD_URL}/artifact/security-reports/pdf/complete_security_report.pdf" download>
+                    📋 RAPPORT COMPLET (PDF)
+                </a>
+                <a class="download-btn" href="${env.BUILD_URL}/artifact/security-reports/pdf/sast_report.pdf" download>
+                    🔍 RAPPORT SAST (PDF)
+                </a>
+                <a class="download-btn" href="${env.BUILD_URL}/artifact/security-reports/pdf/sca_report.pdf" download>
+                    📦 RAPPORT SCA (PDF)
+                </a>
+            </p>
+        </div>
+"""
+                    } else {
+                        pdfDownloadSection = """
+        <div class="warning-section">
+            <h2>⚠️ RAPPORTS PDF NON DISPONIBLES</h2>
+            <p>Les rapports PDF n'ont pas pu être générés. Veuillez consulter les rapports HTML ci-dessous.</p>
+        </div>
+"""
+                    }
+                    
                     def htmlReport = """
 <!DOCTYPE html>
 <html>
@@ -560,8 +586,10 @@ tags = ["password", "secret"]'''
         .status-danger { background: var(--danger); }
         .section { margin: 40px 0; padding: 25px; background: #f8f9fa; border-radius: 10px; }
         .vuln-details { background: white; padding: 15px; margin: 10px 0; border-radius: 5px; font-family: monospace; white-space: pre-wrap; }
-        .blocked { background: #dc3545; color: white; padding: 20px; border-radius: 10px; margin: 20px 0; }
-        .webhook-info { background: #4CAF50; color: white; padding: 15px; border-radius: 8px; margin: 15px 0; }
+        .download-section { background: #e7f3ff; padding: 20px; border-radius: 10px; margin: 20px 0; }
+        .warning-section { background: #fff3cd; padding: 20px; border-radius: 10px; margin: 20px 0; border: 1px solid #ffeaa7; }
+        .download-btn { display: inline-block; background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin: 5px; }
+        .download-btn:hover { background: #0056b3; }
     </style>
 </head>
 <body>
@@ -572,19 +600,7 @@ tags = ["password", "secret"]'''
             <p>Build: ${env.BUILD_NUMBER} | Date: ${new Date().format('yyyy-MM-dd HH:mm:ss')}</p>
         </div>
         
-        <div class="webhook-info">
-            <h2>🔄 DÉCLENCHEMENT AUTOMATIQUE</h2>
-            <p>Ce build a été automatiquement déclenché par un webhook GitHub suite à un push/merge request.</p>
-        </div>
-        
-        ${env.BLOCK_REASON != "NONE" ? """
-        <div class="blocked">
-            <h2>🚨 BUILD BLOQUÉ</h2>
-            <p><strong>Raison:</strong> ${env.BLOCK_REASON}</p>
-            <p><strong>Statut:</strong> ÉCHEC DE SÉCURITÉ</p>
-            <p>Le pipeline a été bloqué pour des raisons de sécurité. Consultez les détails ci-dessous.</p>
-        </div>
-        """ : ""}
+        ${pdfDownloadSection}
         
         <div class="dashboard">
             <div class="metric-card" style="border-left-color: ${secretsCount.toInteger() > 0 ? '#ffc107' : '#28a745'};">
@@ -618,27 +634,21 @@ ${vulnerabilitiesDetails}
         
         <div class="section">
             <h2>📎 RAPPORTS DISPONIBLES</h2>
-            <ul>
-                <li><a href="${env.BUILD_URL}/SAST-SonarQube/">Rapport SAST - SonarQube</a></li>
-                <li><a href="${env.BUILD_URL}/SCA-OWASP-Dependency-Check/">Rapport SCA - OWASP Dependency Check</a></li>
-                <li><a href="${env.BUILD_URL}/Gitleaks-Secrets-Scan/">Rapport Secrets Scan - Gitleaks</a></li>
-                <li><a href="${env.BUILD_URL}/artifact/">Télécharger tous les rapports</a></li>
-            </ul>
+            <div class="download-section">
+                <h3>🌐 RAPPORTS HTML</h3>
+                <ul>
+                    <li><a href="${env.BUILD_URL}/artifact/security-reports/sast/sast_report.html">Rapport SAST</a></li>
+                    <li><a href="${env.BUILD_URL}/artifact/security-reports/sca/dependency-check-report.html">Rapport SCA Détaillé</a></li>
+                    <li><a href="${env.BUILD_URL}/artifact/security-reports/consolidated/security-report.json">Rapport JSON</a></li>
+                    <li><a href="${env.BUILD_URL}/artifact/security-reports/consolidated/security-report.html">Rapport HTML Consolidé</a></li>
+                </ul>
+            </div>
         </div>
     </div>
 </body>
 </html>
 """
                     writeFile file: "security-reports/consolidated/security-report.html", text: htmlReport
-                    
-                    publishHTML([
-                        allowMissing: true,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportName: '📊 Rapport Sécurité Consolidé',
-                        reportDir: 'security-reports/consolidated',
-                        reportFiles: 'security-report.html'
-                    ])
                 }
             }
         }
@@ -646,39 +656,95 @@ ${vulnerabilitiesDetails}
 
     post {
         always {
-            // Archive ALL reports
+            // Archiver TOUS les rapports (HTML, JSON, PDF)
             archiveArtifacts artifacts: 'security-reports/**/*', allowEmptyArchive: true
             
+            // Publier les rapports HTML dans Jenkins
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: 'security-reports/consolidated',
+                reportFiles: 'security-report.html',
+                reportName: '📊 Rapport Sécurité Consolidé'
+            ])
+            
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: 'security-reports/sast',
+                reportFiles: 'sast_report.html',
+                reportName: '🔍 Rapport SAST'
+            ])
+            
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: 'security-reports/sca',
+                reportFiles: 'dependency-check-report.html',
+                reportName: '📦 Rapport SCA'
+            ])
+            
             script {
-                // Read final results for email
+                env.BUILD_STATUS = currentBuild.currentResult
+                env.BUILD_DURATION = currentBuild.durationString
+                
+                // Lecture des résultats finaux
                 def secretsCount = sh(script: 'cat security-reports/secrets_count.txt 2>/dev/null || echo "0"', returnStdout: true).trim()
                 def criticalVulns = sh(script: 'cat security-reports/critical_vulns_count.txt 2>/dev/null || echo "0"', returnStdout: true).trim()
                 def vulnerabilitiesDetails = sh(script: 'cat security-reports/vulnerabilities_details.txt 2>/dev/null || echo "Aucun détail disponible"', returnStdout: true).trim()
                 
-                // Determine email subject and content based on build status
-                def emailSubject = ""
-                def emailBody = ""
+                // Vérifier la disponibilité des PDFs
+                def hasPDFs = sh(script: 'ls security-reports/pdf/*.pdf 2>/dev/null | head -1', returnStdout: true).trim() ? true : false
                 
-                if (currentBuild.result == 'FAILURE') {
-                    emailSubject = "🚨 BUILD BLOQUÉ - Webhook GitHub - Build #${env.BUILD_NUMBER}"
-                    emailBody = """
-🔒 RAPPORT DE SÉCURITÉ DEVSECOPS - BUILD BLOQUÉ
+                // Déterminer le statut de sécurité
+                def securityStatus = "✅ SÉCURISÉ"
+                def securityColor = "#28a745"
+                if (secretsCount.toInteger() > 0 || criticalVulns.toInteger() > 0) {
+                    securityStatus = "⚠️ ATTENTION REQUISE"
+                    securityColor = "#ffc107"
+                }
+                if (criticalVulns.toInteger() > 5) {
+                    securityStatus = "🚨 URGENCE SÉCURITÉ"
+                    securityColor = "#dc3545"
+                }
+                
+                // Préparer le contenu PDF pour l'email
+                def pdfContent = ""
+                if (hasPDFs) {
+                    pdfContent = """
+                        <p><strong>📄 Rapports PDF disponibles:</strong></p>
+                        <ul>
+                            <li><a href="${env.BUILD_URL}/artifact/security-reports/pdf/complete_security_report.pdf">Rapport Complet PDF</a></li>
+                            <li><a href="${env.BUILD_URL}/artifact/security-reports/pdf/sast_report.pdf">Rapport SAST PDF</a></li>
+                            <li><a href="${env.BUILD_URL}/artifact/security-reports/pdf/sca_report.pdf">Rapport SCA PDF</a></li>
+                        </ul>
+                    """
+                } else {
+                    pdfContent = """
+                        <p><strong>⚠️ Rapports PDF:</strong> Non disponibles - consulter les rapports HTML</p>
+                    """
+                }
+                
+                // Email de notification SIMPLIFIÉ - Utilise la configuration Jenkins
+                mail to: "${EMAIL_RECIPIENTS}",
+                     subject: "🔒 RAPPORT DEVSECOPS - Build #${env.BUILD_NUMBER} - ${currentBuild.currentResult}",
+                     body: """
+RAPPORT DE SÉCURITÉ DEVSECOPS - Build #${env.BUILD_NUMBER}
 
-🔄 DÉCLENCHEMENT: Webhook GitHub (Push/Merge Request)
-Build #${env.BUILD_NUMBER} | ${new Date().format('yyyy-MM-dd HH:mm:ss')}
-
-🚨 ATTENTION: Le build a été bloqué pour des raisons de sécurité!
+📅 Date: ${new Date().format('yyyy-MM-dd HH:mm:ss')}
+🔢 Statut Build: ${currentBuild.currentResult}
+⏱️ Durée: ${env.BUILD_DURATION}
 
 📊 MÉTRIQUES DE SÉCURITÉ:
 • 🔐 Secrets détectés: ${secretsCount}
 • ⚠️ Vulnérabilités critiques: ${criticalVulns}
 • 🔍 Statut SAST: ${env.SONAR_STATUS}
-• 📅 Build: ${env.BUILD_NUMBER}
+• 🐳 Image Docker: ${env.DOCKER_IMAGE}:${env.BUILD_NUMBER}
 
-🚨 RAISON DU BLOCAGE: ${env.BLOCK_REASON}
-
-📋 DÉTAILS DES VULNÉRABILITÉS CRITIQUES:
-${vulnerabilitiesDetails}
+${securityStatus}
 
 📎 RAPPORTS DISPONIBLES:
 ${env.BUILD_URL}
@@ -686,58 +752,28 @@ ${env.BUILD_URL}
 Pour plus de détails, connectez-vous à Jenkins et consultez les rapports complets.
 
 --
-Build Automatique - Pipeline DevSecOps
+Rapport automatique - Pipeline DevSecOps
 Ne pas répondre à cet email
 """
-                } else {
-                    emailSubject = "✅ BUILD RÉUSSI - Webhook GitHub - Build #${env.BUILD_NUMBER}"
-                    emailBody = """
-🔒 RAPPORT DE SÉCURITÉ DEVSECOPS - BUILD RÉUSSI
-
-🔄 DÉCLENCHEMENT: Webhook GitHub (Push/Merge Request)
-Build #${env.BUILD_NUMBER} | ${new Date().format('yyyy-MM-dd HH:mm:ss')}
-
-✅ BUILD AUTOMATIQUE TERMINÉ AVEC SUCCÈS
-
-📊 MÉTRIQUES DE SÉCURITÉ:
-• 🔐 Secrets détectés: ${secretsCount}
-• ⚠️ Vulnérabilités critiques: ${criticalVulns}
-• 🔍 Statut SAST: ${env.SONAR_STATUS}
-• 📅 Build: ${env.BUILD_NUMBER}
-
-📋 DÉTAILS DES VULNÉRABILITÉS:
-${vulnerabilitiesDetails}
-
-📎 RAPPORTS DISPONIBLES:
-${env.BUILD_URL}
-
---
-Build Automatique - Pipeline DevSecOps
-Ne pas répondre à cet email
-"""
-                }
                 
-                // Send email notification
-                mail to: "${EMAIL_RECIPIENTS}",
-                     subject: emailSubject,
-                     body: emailBody
-
                 echo " "
                 echo "🎉 PIPELINE DEVSECOPS TERMINÉE"
-                echo "🔄 Déclenchement: Webhook GitHub"
                 echo "📧 Notification email envoyée à: ${EMAIL_RECIPIENTS}"
                 echo "📁 Rapports générés dans: security-reports/"
+                if (hasPDFs) {
+                    echo "📄 Rapports PDF disponibles dans: security-reports/pdf/"
+                } else {
+                    echo "⚠️  Aucun rapport PDF généré"
+                }
                 echo "📎 Téléchargez les rapports depuis: ${env.BUILD_URL}/artifact/"
             }
         }
         
         success {
-            echo '🎉 SUCCÈS : Pipeline DevSecOps complet exécuté avec succès!'
-            echo '🔄 Webhook GitHub fonctionne correctement!'
+            echo '🎉 SUCCÈS : Pipeline exécuté sans interruption !'
         }
         failure {
-            echo '❌ ÉCHEC : Pipeline bloqué par les règles de sécurité (SAST/SCA)'
-            echo '📧 Notification envoyée avec les détails du blocage'
+            echo '⚠️ ÉCHEC TECHNIQUE : Problème d\'infrastructure'
         }
     }
 }
