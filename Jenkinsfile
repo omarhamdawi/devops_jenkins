@@ -15,7 +15,7 @@ pipeline {
         stage('Initialisation') {
             steps {
                 script {
-                    echo "🚀 DÉMARRAGE DU PIPELINE DEVSECOPSs"
+                    echo "🚀 DÉMARRAGE DU PIPELINE DEVSECOPSssss"
                     echo "📅 Date: ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
                     echo "🔢 Build: ${env.BUILD_NUMBER}"
                     
